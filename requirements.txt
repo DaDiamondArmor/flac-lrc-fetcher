@@ -1,0 +1,5 @@
+requests
+mutagen
+hangul-romanize
+cutlet
+unidic-lite
