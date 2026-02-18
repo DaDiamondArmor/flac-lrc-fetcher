@@ -9,15 +9,37 @@ import threading
 import cutlet
 from hangul_romanize.rule import academic
 from hangul_romanize import Transliter
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- Configuration ---
 LRCLIB_API_URL = "https://lrclib.net/api/get"
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
-MAX_WORKERS = 10
+# Lowered to 5 to prevent server-side disconnects/rate-limiting
+MAX_WORKERS = 5
 
 # Initialize Cutlet globally
 KATSU = cutlet.Cutlet()
-KATSU.use_foreign_spelling = False
+KATSU.use_foreign_spelling = False 
+
+# --- Setup Retry Session ---
+def create_retry_session(retries=3, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=["GET"]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+# Global session with retry logic
+SESSION = create_retry_session()
 
 class ProgressTracker:
     def __init__(self):
@@ -65,7 +87,7 @@ def check_if_file_synced(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             # Read first 1000 chars to check for timestamps
-            content = f.read(1000)
+            content = f.read(1000) 
             return check_if_content_synced(content)
     except:
         return False
@@ -106,7 +128,7 @@ def convert_lrc_content(lrc_content):
             converted_lines.append(line)
         else:
             converted_lines.append(romanize_text(line))
-
+            
     return "\n".join(converted_lines)
 
 def embed_lyrics_into_flac(flac_path, lrc_content):
@@ -125,8 +147,9 @@ def fetch_lrc_from_lrclib(artist, title, duration):
         # Attempt 1: Exact Match
         params = {'artist_name': artist, 'track_name': title}
         if duration: params['duration'] = str(duration)
-        response = requests.get(LRCLIB_API_URL, params=params, timeout=10)
-
+        # Use SESSION instead of requests for retry logic
+        response = SESSION.get(LRCLIB_API_URL, params=params, timeout=10)
+        
         if response.status_code == 200:
             data = response.json()
             if data and data.get("syncedLyrics"):
@@ -139,19 +162,19 @@ def fetch_lrc_from_lrclib(artist, title, duration):
         # Attempt 2: Fuzzy Search
         print(f"    -> Exact match failed or incomplete. Trying fuzzy search...")
         search_query = f"{artist} {title}"
-        response = requests.get(LRCLIB_SEARCH_URL, params={"q": search_query}, timeout=10)
-
+        response = SESSION.get(LRCLIB_SEARCH_URL, params={"q": search_query}, timeout=10)
+        
         if response.status_code == 200:
             results = response.json()
             if not results: return None
-
+            
             valid_matches = []
             if duration:
                 for r in results:
                     diff = abs(r.get("duration", 0) - duration)
                     if diff <= 3:
                         valid_matches.append((r, diff))
-
+            
             if valid_matches:
                 valid_matches.sort(key=lambda x: (1 if x[0].get("syncedLyrics") else 0, -x[1]), reverse=True)
                 best_match = valid_matches[0][0]
@@ -184,7 +207,7 @@ def process_song(song_info, tracker, do_romanize, embed_lyrics):
     if lrc_content:
         # Check if we are upgrading: Don't overwrite unsynced with unsynced
         content_is_synced = check_if_content_synced(lrc_content)
-
+        
         if is_upgrade_attempt and not content_is_synced:
             print(f"    -> Only found unsynced lyrics online. Keeping existing unsynced file.")
             return
@@ -201,7 +224,7 @@ def process_song(song_info, tracker, do_romanize, embed_lyrics):
             # 2. Save to .lrc file
             with open(lrc_path, 'w', encoding='utf-8') as f:
                 f.write(lrc_content)
-
+            
             if is_upgrade_attempt:
                 print(f"    -> 🆙 Upgraded to synced lyrics!")
                 tracker.increment_upgraded()
@@ -242,11 +265,11 @@ def process_existing_lrcs(music_dir, embed_lyrics):
 
     for lrc_path in lrc_files_found:
         flac_path = os.path.splitext(lrc_path)[0] + '.flac'
-
+        
         try:
             with open(lrc_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-
+            
             # Romanize logic
             if re.search(r'[ぁ-んァ-ン一-龯\uAC00-\uD7A3]', content):
                 print(f"-> Romanizing: {os.path.basename(lrc_path)}")
@@ -254,7 +277,7 @@ def process_existing_lrcs(music_dir, embed_lyrics):
                 with open(lrc_path, 'w', encoding='utf-8') as f:
                     f.write(content)
                 converted_count += 1
-
+            
             # Embed logic
             if embed_lyrics and os.path.exists(flac_path):
                 print(f"-> Embedding into: {os.path.basename(flac_path)}")
@@ -276,7 +299,7 @@ def process_music_library(music_dir, do_romanize, embed_lyrics, scan_unsynced):
 
     mode_label = "Scanning for UNSYNCED UPGRADES" if scan_unsynced else "Scanning for MISSING LYRICS"
     print(f"--- Phase 1: {mode_label} ---")
-
+    
     songs_to_process = []
     total_files = 0
     lrc_skipped = 0
@@ -288,10 +311,10 @@ def process_music_library(music_dir, do_romanize, embed_lyrics, scan_unsynced):
                 total_files += 1
                 flac_path = os.path.join(root, filename)
                 lrc_path = os.path.splitext(flac_path)[0] + '.lrc'
-
+                
                 lrc_exists = os.path.exists(lrc_path)
                 upgrade_attempt = False
-
+                
                 if scan_unsynced:
                     # Upgrade Mode: Only care if LRC exists and is unsynced
                     if lrc_exists:
@@ -311,7 +334,7 @@ def process_music_library(music_dir, do_romanize, embed_lyrics, scan_unsynced):
                         lrc_skipped += 1
                         continue
                     # Else: LRC missing -> Fetch new
-
+                
                 # If we reached here, we are processing this song
                 if upgrade_attempt:
                      print(f"⚠️  Found unsynced lyrics for '{filename}'. Will try to upgrade.")
@@ -340,7 +363,7 @@ def process_music_library(music_dir, do_romanize, embed_lyrics, scan_unsynced):
             except Exception as exc:
                 print(f"❌ Exception: {exc}")
                 tracker.increment_errors()
-
+    
     print("\n--- Summary ---")
     print(f"Total FLAC files: {total_files}")
     if scan_unsynced:
@@ -361,18 +384,18 @@ def process_music_library(music_dir, do_romanize, embed_lyrics, scan_unsynced):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch, romanize, and embed lyrics for FLAC files.")
     parser.add_argument("music_dir", help="The root directory of your music library.")
-
+    
     # Flags
     parser.add_argument("--romanize", action="store_true", help="Convert Japanese (Romaji) and Korean (Romanized) lyrics.")
     parser.add_argument("--embed", action="store_true", help="Embed the lyrics (text/lrc) into the FLAC file metadata.")
-
+    
     # Modes (Mutually exclusive logical flows)
     group = parser.add_argument_group('modes')
     group.add_argument("--process-existing", action="store_true", help="Local only: Scan existing LRC files to convert/embed them.")
     group.add_argument("--scan-unsynced", action="store_true", help="Upgrade only: Scan existing LRC files for unsynced lyrics and attempt to upgrade them. Ignores missing files.")
 
     args = parser.parse_args()
-
+    
     if args.process_existing:
         process_existing_lrcs(args.music_dir, args.embed)
     else:
